@@ -90,7 +90,6 @@ async function handler(ctx) {
     const responseData = response.data;
     // 若没有指定编码，则默认utf-8
 
-    console.log('🤪 response.headers >>:', response);
     const contentType = response.headers ? response?.headers['content-type'] : '';
     let $ = load(iconv.decode(responseData, 'utf-8'));
     const charset = contentType.match(/charset=([^;]*)/)?.[1] ?? $('meta[charset]').attr('charset') ?? $('meta[http-equiv="Content-Type"]').attr('content')?.split('charset=')?.[1];

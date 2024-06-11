@@ -1,9 +1,9 @@
 import { Route } from '@/types';
 import cache from '@/utils/cache';
-import got from '@/utils/got';
 import { load } from 'cheerio';
 import { parseDate } from '@/utils/parse-date';
 import timezone from '@/utils/timezone';
+import puppeteer from '@/utils/puppeteer';
 
 const host = 'https://www.sehuatang.net/';
 
@@ -55,6 +55,92 @@ export const route: Route = {
   | yczp     | ztzp     | hrjp     | yzxa     | omxa     | ktdm     | ttxz     |`,
 };
 
+const fetchDesc = (list, browser, tryGet) =>
+    Promise.all(
+        list.map((item) =>
+            tryGet(item.link, async () => {
+                const page = await browser.newPage();
+                await page.setRequestInterception(true);
+                page.on('request', (request) => {
+                    request.resourceType() === 'document' || request.resourceType() === 'script' ? request.continue() : request.abort();
+                });
+                await page.goto(item.link, {
+                    waitUntil: 'domcontentloaded',
+                });
+                await page.waitForSelector("td[id^='postmessage']");
+                const content = await page.evaluate(() => document.documentElement.innerHTML);
+                await page.close();
+
+                const $ = load(content);
+                const postMessage = $("td[id^='postmessage']").slice(0, 1);
+
+                const images = $(postMessage).find('img');
+                for (const image of images) {
+                    const file = $(image).attr('file');
+                    if (!file || file === 'undefined') {
+                        $(image).replaceWith('');
+                    } else {
+                        $(image).replaceWith($(`<img src="${file}">`));
+                    }
+                }
+                // if postMessage does not have any images, try to parse image url from `.pattl`
+                if (images.length === 0) {
+                    const pattl = $('.pattl');
+                    const pattlImages = $(pattl).find('img');
+                    for (const pattlImage of pattlImages) {
+                        const file = $(pattlImage).attr('file');
+                        if (!file || file === 'undefined') {
+                            $(pattlImage).replaceWith('');
+                        } else {
+                            $(pattlImage).replaceWith($(`<img src="${file}" />`));
+                        }
+                    }
+                    postMessage.append($(pattl));
+                }
+
+                $('em[onclick]').remove();
+
+                const magnetTags = postMessage
+                    .find('div.blockcode li')
+                    .toArray()
+                    .map((item) => {
+                        const magnet = $(item).text();
+                        const isMag = magnet.startsWith('magnet');
+                        if (isMag) {
+                            item.enclosure_url = magnet;
+                            item.enclosure_type = 'application/x-bittorrent';
+                        }
+                        return `<div><a href="${magnet}">${magnet}</a></div>`;
+                    });
+
+                if (magnetTags.length) {
+                    postMessage.find('div.blockcode').html(magnetTags);
+                }
+
+                $('.pattl')
+                    .find('p.attnm a')
+                    .toArray()
+                    .forEach((torrent) => {
+                        const fileName = $(torrent).text();
+                        if (fileName) {
+                            postMessage.append(`<div><a href="${$(torrent).attr('href')}">${fileName}</a></div>`);
+                        }
+                    });
+
+                const otherInfo = postMessage.html()?.replace(/ignore_js_op/g, 'div');
+
+                if (otherInfo) {
+                    item.pubDate = timezone(parseDate($('.authi em span').attr('title')), 8);
+                    item.description = otherInfo;
+                } else {
+                    item.description = '<h1>抓取内容失败 !</h1>';
+                }
+
+                return item;
+            })
+        )
+    );
+
 async function handler(ctx) {
     const subformName = ctx.req.param('subforumid') ?? 'gqzwzm';
     const subformId = subformName in forumIdMaps ? forumIdMaps[subformName] : subformName;
@@ -67,13 +153,31 @@ async function handler(ctx) {
         Cookie: '_safe=vqd37pjm4p5uodq339yzk6b7jdt6oich',
     };
 
-    const response = await got(link, {
-        headers,
+    const browser = await puppeteer({ stealth: true });
+    const page = await browser.newPage();
+
+    await page.setRequestInterception(true);
+    page.on('request', (request) => {
+        request.resourceType() === 'document' || request.resourceType() === 'script' ? request.continue() : request.abort();
     });
-    const $ = load(response.data);
+
+    await page.goto(link, {
+        waitUntil: 'domcontentloaded',
+    });
+
+    // 等待类名为 confirmButton 的按钮出现
+    await page.waitForSelector('.enter-btn');
+
+    // 点击按钮并等待导航完成
+    await Promise.all([page.click('.enter-btn:nth-of-type(1)'), page.waitForNavigation({ waitUntil: 'networkidle2' })]);
+
+    // 获取跳转后页面的内容
+    const content = await page.evaluate(() => document.documentElement.innerHTML);
+
+    const $ = load(content);
 
     const list = $('#threadlisttableid tbody[id^=normalthread]')
-        .slice(0, ctx.req.query('limit') ? Number.parseInt(ctx.req.query('limit')) : 25)
+        .slice(0, ctx.req.query('limit') ? Number.parseInt(ctx.req.query('limit')) : 30)
         .toArray()
         .map((item) => {
             item = $(item);
@@ -86,60 +190,15 @@ async function handler(ctx) {
             };
         });
 
-    const out = await Promise.all(
-        list.map((info) =>
-            cache.tryGet(info.link, async () => {
-                const response = await got(info.link, {
-                    headers,
-                });
+    const items = await fetchDesc(list, browser, cache.tryGet);
 
-                const $ = load(response.data);
-                const postMessage = $("td[id^='postmessage']").slice(0, 1);
-                const images = $(postMessage).find('img');
-                for (const image of images) {
-                    const file = $(image).attr('file');
-                    if (!file || file === 'undefined') {
-                        $(image).replaceWith('');
-                    } else {
-                        $(image).replaceWith($(`<img src="${file}">`));
-                    }
-                }
-                // also parse image url from `.pattl`
-                const pattl = $('.pattl');
-                const pattlImages = $(pattl).find('img');
-                for (const pattlImage of pattlImages) {
-                    const file = $(pattlImage).attr('file');
-                    if (!file || file === 'undefined') {
-                        $(pattlImage).replaceWith('');
-                    } else {
-                        $(pattlImage).replaceWith($(`<img src="${file}" />`));
-                    }
-                }
-                postMessage.append($(pattl));
-                $('em[onclick]').remove();
+    const title = `色花堂 - ${$('#pt > div:nth-child(1) > a:last-child').text()}`;
 
-                info.description = (postMessage.html() || '抓取原帖失败').replaceAll('ignore_js_op', 'div');
-                info.pubDate = timezone(parseDate($('.authi em span').attr('title')), 8);
-
-                const magnet = postMessage.find('div.blockcode li').first().text();
-                const isMag = magnet.startsWith('magnet');
-                const torrent = postMessage.find('p.attnm a').attr('href');
-
-                const hasEnclosureUrl = isMag || torrent !== undefined;
-                if (hasEnclosureUrl) {
-                    const enclosureUrl = isMag ? magnet : new URL(torrent, host).href;
-                    info.enclosure_url = enclosureUrl;
-                    info.enclosure_type = isMag ? 'application/x-bittorrent' : 'application/octet-stream';
-                }
-
-                return info;
-            })
-        )
-    );
+    await browser.close();
 
     return {
-        title: `色花堂 - ${$('#pt > div:nth-child(1) > a:last-child').text()}`,
+        title,
         link,
-        item: out,
+        item: items,
     };
 }

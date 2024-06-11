@@ -56,7 +56,7 @@ async function loadContent(itemLink, charset, header) {
 }
 
 export const route: Route = {
-    path: ['/:ver{[7x]}/:cid{[0-9]{2}}/:link{.+}', '/:ver{[7x]}/:link{.+}', '/:link{.+}'],
+    path: ['/:ver{[7xz]}/:cid{[0-9]{2}}/:link{.+}', '/:ver{[7xz]}/:link{.+}', '/:link{.+}'],
     name: 'Unknown',
     maintainers: [],
     handler,
@@ -68,12 +68,15 @@ async function handler(ctx) {
     const cid = ctx.req.param('cid');
     link = link.replace(/:\/\//, ':/').replace(/:\//, '://');
 
-    const cookie = cid === undefined ? '' : config.discuz.cookies[cid];
+    const cookie =
+        cid === undefined
+            ? '4fJN_2132_ulastactivity=e4e0USXSBwO1OJuLee%2B9TME6uN9TXYYTC11cLtXi1Gt%2FdP%2FrGpcd;4fJN_2132_auth=59a6PFqBdTD38qqpKXiW%2Fes8ZrKOiAzWEL5G%2FBJQl0K%2BvGg%2F8vwgVlBoSZyxt1MUe09%2B7uO8PSWfvzjjTjmQF319%2FA;4fJN_2132_lastcheckfeed=37275%7C1700921095;existmag=mag;4fJN_2132_visitedfid=2D36;4fJN_2132_saltkey=f1dd33cC;4fJN_2132_lastvisit=1700903356;4fJN_2132_forum_lastvisit=D_2_1701326821;4fJN_2132_smile=4D1;4fJN_2132_sid=MttGgW;4fJN_2132_lastact=1701326821%09forum.php%09forumdisplay;4fJN_2132_checkpm=1;4fJN_2132_lip=66.90.115.138%2C1701087829;4fJN_2132_onlineusernum=8567;4fJN_2132_sendmail=1;4fJN_2132_st_t=37275%7C1701326821%7C42d3f509f2d05db2cdb9838a30afdf8a'
+            : config.discuz.cookies[cid];
     if (cookie === undefined) {
         throw new ConfigNotFoundError('缺少对应论坛的cookie.');
     }
 
-    const header = {
+    const headers = {
         Cookie: cookie,
     };
 
@@ -81,12 +84,14 @@ async function handler(ctx) {
         method: 'get',
         url: link,
         responseType: 'buffer',
-        headers: header,
+        headers,
     });
 
     const responseData = response.data;
     // 若没有指定编码，则默认utf-8
-    const contentType = response.headers['content-type'] || '';
+
+    console.log('🤪 response.headers >>:', response);
+    const contentType = response.headers ? response?.headers['content-type'] : '';
     let $ = load(iconv.decode(responseData, 'utf-8'));
     const charset = contentType.match(/charset=([^;]*)/)?.[1] ?? $('meta[charset]').attr('charset') ?? $('meta[http-equiv="Content-Type"]').attr('content')?.split('charset=')?.[1];
     if (charset?.toLowerCase() !== 'utf-8') {
@@ -116,7 +121,7 @@ async function handler(ctx) {
         items = await Promise.all(
             list.map((item) =>
                 cache.tryGet(item.link, async () => {
-                    const { description } = await loadContent(item.link, charset, header);
+                    const { description } = await loadContent(item.link, charset, headers);
 
                     item.description = description;
                     return item;
@@ -143,7 +148,38 @@ async function handler(ctx) {
         items = await Promise.all(
             list.map((item) =>
                 cache.tryGet(item.link, async () => {
-                    const { description } = await loadContent(item.link, charset, header);
+                    const { description } = await loadContent(item.link, charset, headers);
+
+                    item.description = description;
+                    return item;
+                })
+            )
+        );
+    } else if (version.toUpperCase().startsWith('DISCUZ! Z')) {
+        // http://localhost:1200/discuz/z/https%3A%2F%2Fwww.javbus.com%2Fforum%2Fforum.php%3Fmod%3Dforumdisplay%26fid%3D36?image_hotlink_template=https://bus.15146018521.workers.dev/$%7Bprotocol%7D//$%7Bhost%7D$%7Bpathname%7D
+        // console.log('🤪 link >>:', link);
+        const listDom = $('tbody[id^="normalthread"]');
+
+        const list = listDom
+            .slice(0, ctx.req.query('limit') ? Number.parseInt(ctx.req.query('limit'), 10) : 30)
+            .toArray()
+            .map((item) => {
+                item = $(item);
+                const $s = item.find('.post_inforight .post_infolist_tit .s');
+                const $t = item.find('.post_inforight .post_infolist_other .time');
+                const pubDate = parseDate($t.find('span[title]').attr('title').trim());
+                const author = $t.find('a').text().trim();
+                return {
+                    title: $s.text(),
+                    link: fixUrl($s.attr('href'), link),
+                    author,
+                    pubDate,
+                };
+            });
+        items = await Promise.all(
+            list.map((item) =>
+                cache.tryGet(item.link, async () => {
+                    const { description } = await loadContent(item.link, charset, headers);
 
                     item.description = description;
                     return item;

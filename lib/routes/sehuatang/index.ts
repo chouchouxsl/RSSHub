@@ -4,6 +4,13 @@ import { load } from 'cheerio';
 import { parseDate } from '@/utils/parse-date';
 import timezone from '@/utils/timezone';
 import puppeteer from '@/utils/puppeteer';
+import logger from '@/utils/logger';
+
+const confirmButton = '.enter-btn:nth-of-type(1)';
+const threadlisttableid = '#threadlisttableid tbody[id^=normalthread]';
+const postmessage = "td[id^='postmessage']";
+
+const timeout = 10000;
 
 const host = 'https://www.sehuatang.net/';
 
@@ -55,10 +62,12 @@ export const route: Route = {
   | yczp     | ztzp     | hrjp     | yzxa     | omxa     | ktdm     | ttxz     |`,
 };
 
-const fetchDesc = (list, browser, tryGet) =>
+const fetchDesc = (list, browser) =>
     Promise.all(
         list.map((item) =>
-            tryGet(item.link, async () => {
+            cache.tryGet(item.link, async () => {
+                logger.http(`Requesting ${item.link}`);
+
                 const page = await browser.newPage();
                 await page.setRequestInterception(true);
                 page.on('request', (request) => {
@@ -67,14 +76,15 @@ const fetchDesc = (list, browser, tryGet) =>
                 await page.goto(item.link, {
                     waitUntil: 'domcontentloaded',
                 });
-                await page.waitForSelector("td[id^='postmessage']");
-                const content = await page.evaluate(() => document.documentElement.innerHTML);
+                await page.waitForSelector(postmessage, { timeout });
+                const content = await page.content();
                 await page.close();
 
                 const $ = load(content);
-                const postMessage = $("td[id^='postmessage']").slice(0, 1);
+                const postMessage = $(postmessage).slice(0, 1);
 
                 const images = $(postMessage).find('img');
+
                 for (const image of images) {
                     const file = $(image).attr('file');
                     if (!file || file === 'undefined') {
@@ -147,11 +157,11 @@ async function handler(ctx) {
     const type = ctx.req.param('type');
     const typefilter = type ? `&filter=typeid&typeid=${type}` : '';
     const link = `${host}forum.php?mod=forumdisplay&orderby=dateline&fid=${subformId}${typefilter}`;
-    const headers = {
-        'Accept-Encoding': 'gzip, deflate, br',
-        'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
-        Cookie: '_safe=vqd37pjm4p5uodq339yzk6b7jdt6oich',
-    };
+    // const headers = {
+    //     'Accept-Encoding': 'gzip, deflate, br',
+    //     'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+    //     Cookie: '_safe=vqd37pjm4p5uodq339yzk6b7jdt6oich',
+    // };
 
     const browser = await puppeteer({ stealth: true });
     const page = await browser.newPage();
@@ -161,23 +171,33 @@ async function handler(ctx) {
         request.resourceType() === 'document' || request.resourceType() === 'script' ? request.continue() : request.abort();
     });
 
+    logger.http(`Requesting ${link}`);
+
     await page.goto(link, {
         waitUntil: 'domcontentloaded',
+        referer: host,
     });
 
+    const c1 = await page.content();
+
+    console.log('🤪 c1 >>:', c1);
     // 等待类名为 confirmButton 的按钮出现
-    await page.waitForSelector('.enter-btn');
-
-    // 点击按钮并等待导航完成
-    await Promise.all([page.click('.enter-btn:nth-of-type(1)'), page.waitForNavigation({ waitUntil: 'networkidle2' })]);
-
+    await page.waitForSelector(confirmButton, { timeout });
+    // 点击按钮
+    page.click(confirmButton);
+    // 并等待导航完成
+    await page.waitForNavigation({ waitUntil: 'domcontentloaded' });
+    // 等待内容展示
+    await page.waitForSelector(threadlisttableid, { timeout });
     // 获取跳转后页面的内容
-    const content = await page.evaluate(() => document.documentElement.innerHTML);
+    const content = await page.content();
+
+    console.log('🤪 c2 >>:', content);
 
     const $ = load(content);
 
-    const list = $('#threadlisttableid tbody[id^=normalthread]')
-        .slice(0, ctx.req.query('limit') ? Number.parseInt(ctx.req.query('limit')) : 30)
+    const list = $(threadlisttableid)
+        .slice(0, ctx.req.query('limit') ? Number.parseInt(ctx.req.query('limit')) : 15)
         .toArray()
         .map((item) => {
             item = $(item);
@@ -190,7 +210,7 @@ async function handler(ctx) {
             };
         });
 
-    const items = await fetchDesc(list, browser, cache.tryGet);
+    const items = await fetchDesc(list, browser);
 
     const title = `色花堂 - ${$('#pt > div:nth-child(1) > a:last-child').text()}`;
 

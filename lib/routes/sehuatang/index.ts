@@ -5,12 +5,13 @@ import { parseDate } from '@/utils/parse-date';
 import timezone from '@/utils/timezone';
 import puppeteer from '@/utils/puppeteer';
 import logger from '@/utils/logger';
+import { getCookies } from '@/utils/puppeteer-utils';
 
-const confirmButton = '.enter-btn:nth-of-type(1)';
+const confirmButton = 'a.enter-btn';
 const threadlisttableid = '#threadlisttableid tbody[id^=normalthread]';
 const postmessage = "td[id^='postmessage']";
 
-const timeout = 10000;
+let cookies = void 0;
 
 const host = 'https://www.sehuatang.net/';
 
@@ -74,9 +75,9 @@ const fetchDesc = (list, browser) =>
                     request.resourceType() === 'document' || request.resourceType() === 'script' ? request.continue() : request.abort();
                 });
                 await page.goto(item.link, {
-                    waitUntil: 'domcontentloaded',
+                    waitUntil: 'networkidle2',
+                    referer: host,
                 });
-                await page.waitForSelector(postmessage, { timeout });
                 const content = await page.content();
                 await page.close();
 
@@ -157,11 +158,6 @@ async function handler(ctx) {
     const type = ctx.req.param('type');
     const typefilter = type ? `&filter=typeid&typeid=${type}` : '';
     const link = `${host}forum.php?mod=forumdisplay&orderby=dateline&fid=${subformId}${typefilter}`;
-    // const headers = {
-    //     'Accept-Encoding': 'gzip, deflate, br',
-    //     'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
-    //     Cookie: '_safe=vqd37pjm4p5uodq339yzk6b7jdt6oich',
-    // };
 
     const browser = await puppeteer({ stealth: true });
     const page = await browser.newPage();
@@ -174,25 +170,23 @@ async function handler(ctx) {
     logger.http(`Requesting ${link}`);
 
     await page.goto(link, {
-        waitUntil: 'domcontentloaded',
+        waitUntil: 'networkidle0',
         referer: host,
     });
 
-    const c1 = await page.content();
-
-    console.log('🤪 c1 >>:', c1);
     // 等待类名为 confirmButton 的按钮出现
-    await page.waitForSelector(confirmButton, { timeout });
-    // 点击按钮
-    page.click(confirmButton);
-    // 并等待导航完成
-    await page.waitForNavigation({ waitUntil: 'domcontentloaded' });
+    await page.waitForSelector(confirmButton, { visible: true });
+    const button = await page.$(confirmButton); // 获取按钮元素
+    if (!button) {
+        return '<h1>bbbbbb</h1>';
+    }
+    await Promise.all([button.click(), page.waitForNavigation({ waitUntil: 'networkidle0' })]);
     // 等待内容展示
-    await page.waitForSelector(threadlisttableid, { timeout });
+    await page.waitForSelector(threadlisttableid, { visible: true });
     // 获取跳转后页面的内容
     const content = await page.content();
-
-    console.log('🤪 c2 >>:', content);
+    cookies = await getCookies(page);
+    console.log('🤪 cookies >>:', cookies);
 
     const $ = load(content);
 
